@@ -16,7 +16,9 @@ import flet as ft
 DATA_FILE = Path.home() / ".food_familiarity_game.json"
 MEALS_FILE = Path.home() / ".food_familiarity_game_meals.json"
 STREAK_FILE = Path.home() / ".food_familiarity_game_streak.json"
+MOOD_FILE = Path.home() / ".food_familiarity_game_mood.json"
 MEAL_TYPES = ("朝食", "昼食", "夕食")
+MOOD_OPTIONS = ("元気", "安心", "楽しい", "ちょっと不安", "眠い", "休みたい")
 CHARACTER_STAGES = (
     (0, "🫘", "たねっこ", "食事の記録で少しずつ育つよ"),
     (3, "🌱", "めばえっこ", "かわいい芽が出てきたよ"),
@@ -250,6 +252,65 @@ def get_character_stage(experience):
     return stage_index, CHARACTER_STAGES[stage_index]
 
 
+def upsert_daily_mood(entries, mood, target_date):
+    cleaned = [entry for entry in entries if entry.get("date") != target_date]
+    cleaned.append({"date": target_date, "mood": mood})
+    return cleaned[-200:]
+
+
+def load_mood_entries():
+    try:
+        saved = json.loads(MOOD_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(saved, list):
+        return []
+    valid = []
+    for entry in saved:
+        if not isinstance(entry, dict):
+            continue
+        mood = entry.get("mood")
+        day = entry.get("date")
+        if mood not in MOOD_OPTIONS or not isinstance(day, str):
+            continue
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            continue
+        valid.append({"date": day, "mood": mood})
+    return valid[-200:]
+
+
+def save_mood_entries(entries):
+    MOOD_FILE.write_text(
+        json.dumps(entries[-200:], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def get_today_mood(entries):
+    today = date.today().isoformat()
+    for entry in reversed(entries):
+        if entry.get("date") == today:
+            return entry.get("mood")
+    return None
+
+
+def build_icon_visual(icon, size=38, radius=34):
+    if isinstance(icon, str) and icon.startswith("data:image/"):
+        return (
+            "image",
+            ft.Image(
+                src=icon,
+                width=size,
+                height=size,
+                fit=ft.BoxFit.COVER,
+                border_radius=radius,
+            ),
+        )
+    return ("emoji", ft.Text(icon, size=size))
+
+
 def get_level(points):
     return max(1, points // LEVEL_STEP_POINTS + 1)
 
@@ -320,6 +381,7 @@ def main(page: ft.Page):
     character_exp = load_character_exp(meals)
     character_design = load_character_design()
     character_icon = load_character_icon(character_design, character_exp)
+    mood_entries = load_mood_entries()
     streak_dates = load_streak_dates()
     for meal in meals:
         meal_date = parse_activity_date(meal.get("date"))
@@ -377,6 +439,17 @@ def main(page: ft.Page):
     level_label = ft.Text(color=INK, size=14, weight=ft.FontWeight.BOLD)
     streak_summary = ft.Text(color=INK, size=13, weight=ft.FontWeight.BOLD)
     streak_record = ft.Text(color=MUTED, size=11)
+    mood_dropdown = ft.Dropdown(
+        value=get_today_mood(mood_entries),
+        label="今日の気分",
+        options=[ft.DropdownOption(key=mood, text=mood) for mood in MOOD_OPTIONS],
+        border_radius=10,
+        border_color="#D8DED3",
+        focused_border_color=GREEN,
+        text_size=12,
+        width=170,
+    )
+    mood_status = ft.Text(color=MUTED, size=11)
     level_progress = ft.ProgressBar(
         value=0,
         color=GREEN,
@@ -412,35 +485,16 @@ def main(page: ft.Page):
         bgcolor="#FFF8E8",
         border_radius=34,
     )
-    character_icon_status = ft.Text(color=MUTED, size=10)
-    character_icon_picker = ft.Dropdown(
-        value=character_icon if character_icon in CHARACTER_ICON_OPTIONS else None,
-        label="絵文字アイコン",
-        options=[
-            ft.DropdownOption(key=icon, text=icon)
-            for icon in CHARACTER_ICON_OPTIONS
-        ],
-        border_radius=10,
-        border_color="#D8DED3",
-        focused_border_color=GREEN,
-        text_size=12,
-        width=150,
+    profile_avatar = ft.Container(
+        width=82,
+        height=82,
+        alignment=ft.Alignment.CENTER,
+        bgcolor="#FFFFFF",
+        border_radius=41,
     )
+    character_icon_status = ft.Text(color=MUTED, size=10)
     character_name = ft.Text(color=INK, size=15, weight=ft.FontWeight.BOLD)
     character_description = ft.Text(color=MUTED, size=11)
-    character_design_picker = ft.Dropdown(
-        value=character_design,
-        label="デザイン",
-        options=[
-            ft.DropdownOption(key=design, text=design)
-            for design in CHARACTER_DESIGNS
-        ],
-        border_radius=10,
-        border_color="#D8DED3",
-        focused_border_color=GREEN,
-        text_size=12,
-        width=125,
-    )
     character_progress = ft.ProgressBar(
         value=0,
         color=GREEN,
@@ -545,7 +599,6 @@ def main(page: ft.Page):
             character_icon = previous_icon
             notify("アイコンを保存できませんでした。保存先をご確認ください。", "#B24B3F")
             return
-        character_icon_picker.value = None
         render_character()
         notify("キャラクターのアイコンを変更しました。")
 
@@ -594,22 +647,33 @@ def main(page: ft.Page):
         streak_summary.value = f"🔥 {current}日連続記録"
         streak_record.value = f"最高記録 {longest}日"
 
+    def change_today_mood(event):
+        nonlocal mood_entries
+        selected = mood_dropdown.value
+        if selected not in MOOD_OPTIONS:
+            mood_dropdown.value = get_today_mood(mood_entries)
+            return
+        today = date.today().isoformat()
+        mood_entries = upsert_daily_mood(mood_entries, selected, today)
+        save_mood_entries(mood_entries)
+        mood_status.value = f"今日の気分：{selected}"
+        page.update()
+
+    mood_dropdown.on_change = change_today_mood
+    mood_status.value = (
+        f"今日の気分：{get_today_mood(mood_entries)}"
+        if get_today_mood(mood_entries)
+        else "今日の気分を選んでください"
+    )
+
     def render_character():
         stage_index, _ = get_character_stage(character_exp)
         threshold = CHARACTER_STAGES[stage_index][0]
         _, name, description = CHARACTER_DESIGNS[character_design][stage_index]
-        if character_icon.startswith("data:image/"):
-            character_avatar.content = ft.Image(
-                src=character_icon,
-                width=68,
-                height=68,
-                fit=ft.BoxFit.COVER,
-                border_radius=34,
-            )
-            character_icon_status.value = "自分の画像"
-        else:
-            character_avatar.content = ft.Text(character_icon, size=38)
-            character_icon_status.value = "絵文字アイコン"
+        kind, avatar_widget = build_icon_visual(character_icon, size=38, radius=34)
+        character_avatar.content = avatar_widget
+        profile_avatar.content = build_icon_visual(character_icon, size=46, radius=41)[1]
+        character_icon_status.value = "自分の画像" if kind == "image" else "絵文字アイコン"
         character_name.value = f"{name}　・　記録 {character_exp}回"
         character_description.value = description
         if stage_index + 1 < len(CHARACTER_STAGES):
@@ -621,55 +685,6 @@ def main(page: ft.Page):
         else:
             character_progress.value = 1
             character_next.value = "これからも一緒に育っていこう！"
-
-    def change_character_design(event):
-        nonlocal character_design
-        new_design = character_design_picker.value
-        if new_design not in CHARACTER_DESIGNS:
-            character_design_picker.value = character_design
-            notify("キャラクターデザインを選び直してください。", "#B24B3F")
-            return
-        previous_design = character_design
-        character_design = new_design
-        try:
-            save_meals(meals, character_exp, character_design, character_icon)
-        except OSError:
-            character_design = previous_design
-            character_design_picker.value = previous_design
-            render_character()
-            notify("デザインを保存できませんでした。保存先をご確認ください。", "#B24B3F")
-            return
-        render_character()
-        notify(f"「{character_design}」デザインに変更しました。")
-
-    character_design_picker.on_change = change_character_design
-
-    def change_character_icon(event):
-        nonlocal character_icon
-        new_icon = character_icon_picker.value
-        if new_icon not in CHARACTER_ICON_OPTIONS:
-            character_icon_picker.value = (
-                character_icon
-                if character_icon in CHARACTER_ICON_OPTIONS
-                else None
-            )
-            return
-        previous_icon = character_icon
-        character_icon = new_icon
-        try:
-            save_meals(meals, character_exp, character_design, character_icon)
-        except OSError:
-            character_icon = previous_icon
-            character_icon_picker.value = (
-                previous_icon if previous_icon in CHARACTER_ICON_OPTIONS else None
-            )
-            render_character()
-            notify("アイコンを保存できませんでした。保存先をご確認ください。", "#B24B3F")
-            return
-        render_character()
-        notify("キャラクターのアイコンを変更しました。")
-
-    character_icon_picker.on_change = change_character_icon
 
     def render_meal_summary():
         meal_date_label.value = selected_meal_date.isoformat()
@@ -1499,17 +1514,23 @@ def main(page: ft.Page):
                                     spacing=4,
                                     expand=True,
                                 ),
-                                ft.Container(
-                                    content=ft.Text("🍓", size=46),
-                                    width=82,
-                                    height=82,
-                                    alignment=ft.Alignment.CENTER,
-                                    bgcolor="#FFFFFF",
-                                    border_radius=41,
-                                ),
+                                profile_avatar,
                             ],
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             spacing=8,
+                        ),
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.Text("今日の気分", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
+                                    mood_dropdown,
+                                    mood_status,
+                                ],
+                                spacing=6,
+                            ),
+                            padding=12,
+                            bgcolor="#FFFFFF",
+                            border_radius=14,
                         ),
                         ft.Container(
                             content=ft.Column(
@@ -1564,8 +1585,6 @@ def main(page: ft.Page):
                                             character_description,
                                             ft.Row(
                                                 [
-                                                    character_design_picker,
-                                                    character_icon_picker,
                                                     ft.Button(
                                                         "画像を選ぶ",
                                                         icon=ft.Icons.IMAGE_OUTLINED,
