@@ -17,6 +17,7 @@ DATA_FILE = Path.home() / ".food_familiarity_game.json"
 MEALS_FILE = Path.home() / ".food_familiarity_game_meals.json"
 STREAK_FILE = Path.home() / ".food_familiarity_game_streak.json"
 MOOD_FILE = Path.home() / ".food_familiarity_game_mood.json"
+PROFILE_FILE = Path.home() / ".food_familiarity_game_profile.json"
 MEAL_TYPES = ("朝食", "昼食", "夕食")
 MOOD_OPTIONS = ("元気", "安心", "楽しい", "ちょっと不安", "眠い", "休みたい")
 CHARACTER_STAGES = (
@@ -258,6 +259,177 @@ def upsert_daily_mood(entries, mood, target_date):
     return cleaned[-200:]
 
 
+def _parse_measurement_value(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def normalize_profile_history(history):
+    if not isinstance(history, list):
+        return []
+    valid_entries = []
+    seen_dates = set()
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        date_value = entry.get("date")
+        if not isinstance(date_value, str):
+            continue
+        try:
+            date.fromisoformat(date_value)
+        except ValueError:
+            continue
+        height_value = _parse_measurement_value(entry.get("height_cm"))
+        weight_value = _parse_measurement_value(entry.get("weight_kg"))
+        if height_value is None and weight_value is None:
+            continue
+        key = date_value
+        if key in seen_dates:
+            continue
+        seen_dates.add(key)
+        valid_entries.append(
+            {
+                "date": date_value,
+                "height_cm": "" if height_value is None else str(height_value),
+                "weight_kg": "" if weight_value is None else str(weight_value),
+            }
+        )
+    return valid_entries[-30:]
+
+
+def load_profile_data():
+    defaults = {"height_cm": "", "weight_kg": "", "history": []}
+    try:
+        saved = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults.copy()
+    if not isinstance(saved, dict):
+        return defaults.copy()
+    history = normalize_profile_history(saved.get("history", []))
+    height = saved.get("height_cm", "")
+    weight = saved.get("weight_kg", "")
+    if isinstance(height, str):
+        height = height.strip()
+    else:
+        height = ""
+    if isinstance(weight, str):
+        weight = weight.strip()
+    else:
+        weight = ""
+    if not height and history:
+        latest = history[-1]
+        height = latest.get("height_cm", "")
+    if not weight and history:
+        latest = history[-1]
+        weight = latest.get("weight_kg", "")
+    return {
+        "height_cm": height,
+        "weight_kg": weight,
+        "history": history,
+    }
+
+
+def save_profile_data(profile):
+    payload = {
+        "height_cm": "",
+        "weight_kg": "",
+        "history": [],
+    }
+    if isinstance(profile, dict):
+        payload["height_cm"] = str(profile.get("height_cm", "")).strip()
+        payload["weight_kg"] = str(profile.get("weight_kg", "")).strip()
+        payload["history"] = normalize_profile_history(profile.get("history", []))
+    PROFILE_FILE.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def build_measurement_chart_svg(history, height_cm="", weight_kg="", width=310, height=120):
+    entries = normalize_profile_history(history)
+    if height_cm:
+        entries = [
+            entry
+            for entry in entries
+            if entry.get("date") != date.today().isoformat()
+        ]
+        entries.append({
+            "date": date.today().isoformat(),
+            "height_cm": height_cm,
+            "weight_kg": weight_kg,
+        })
+    if not entries:
+        return None
+    all_values = []
+    for entry in entries:
+        height_value = _parse_measurement_value(entry.get("height_cm"))
+        weight_value = _parse_measurement_value(entry.get("weight_kg"))
+        if height_value is not None:
+            all_values.append(height_value)
+        if weight_value is not None:
+            all_values.append(weight_value)
+    if not all_values:
+        return None
+    series_min = min(all_values)
+    series_max = max(all_values)
+    if series_min == series_max:
+        series_min -= 1
+        series_max += 1
+    padding_left = 18
+    padding_right = 12
+    padding_top = 12
+    padding_bottom = 20
+    plot_width = width - padding_left - padding_right
+    plot_height = height - padding_top - padding_bottom
+
+    def point_for(value, index, total):
+        x = padding_left + (plot_width * index / max(1, total - 1)) if total > 1 else padding_left + plot_width / 2
+        y = padding_top + plot_height - ((value - series_min) / (series_max - series_min)) * plot_height
+        return x, y
+
+    height_points = []
+    weight_points = []
+    for index, entry in enumerate(entries):
+        height_value = _parse_measurement_value(entry.get("height_cm"))
+        weight_value = _parse_measurement_value(entry.get("weight_kg"))
+        if height_value is not None:
+            height_points.append(point_for(height_value, index, len(entries)))
+        if weight_value is not None:
+            weight_points.append(point_for(weight_value, index, len(entries)))
+
+    height_polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in height_points)
+    weight_polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in weight_points)
+    grid_lines = "".join(
+        f'<line x1="{padding_left}" y1="{padding_top + i * (plot_height / 4):.1f}" x2="{width - padding_right}" y2="{padding_top + i * (plot_height / 4):.1f}" stroke="#E3E7E0" stroke-width="1" />'
+        for i in range(5)
+    )
+    axis_labels = "".join(
+        f'<text x="{padding_left + 2}" y="{height - 4}" fill="#7B827A" font-size="9">{entry["date"][5:]}</text>'
+        for entry in entries
+    )
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+      <rect width="100%" height="100%" rx="12" fill="#F7F9F4" />
+      {grid_lines}
+      <polyline points="{height_polyline}" fill="none" stroke="#315C49" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+      <polyline points="{weight_polyline}" fill="none" stroke="#EAA65B" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+      {axis_labels}
+      <text x="{padding_left}" y="10" fill="#315C49" font-size="9">身長</text>
+      <text x="{width - 36}" y="10" fill="#EAA65B" font-size="9">体重</text>
+    </svg>'''
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+
 def load_mood_entries():
     try:
         saved = json.loads(MOOD_FILE.read_text(encoding="utf-8"))
@@ -298,17 +470,21 @@ def get_today_mood(entries):
 
 def build_icon_visual(icon, size=38, radius=34):
     if isinstance(icon, str) and icon.startswith("data:image/"):
-        return (
-            "image",
-            ft.Image(
-                src=icon,
-                width=size,
-                height=size,
-                fit=ft.BoxFit.COVER,
-                border_radius=radius,
-            ),
+        return ("image", icon)
+    return ("emoji", icon)
+
+
+def render_icon_visual(icon, size=38, radius=34):
+    kind, value = build_icon_visual(icon, size=size, radius=radius)
+    if kind == "image":
+        return ft.Image(
+            src=value,
+            width=size,
+            height=size,
+            fit=ft.BoxFit.COVER,
+            border_radius=radius,
         )
-    return ("emoji", ft.Text(icon, size=size))
+    return ft.Text(value, size=size)
 
 
 def get_level(points):
@@ -450,6 +626,39 @@ def main(page: ft.Page):
         width=170,
     )
     mood_status = ft.Text(color=MUTED, size=11)
+    profile_data = load_profile_data()
+    height_field = ft.TextField(
+        label="身長",
+        hint_text="cm",
+        value=profile_data["height_cm"],
+        width=130,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        border_radius=10,
+        border_color="#D8DED3",
+        focused_border_color=GREEN,
+        text_size=12,
+    )
+    weight_field = ft.TextField(
+        label="体重",
+        hint_text="kg",
+        value=profile_data["weight_kg"],
+        width=130,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        border_radius=10,
+        border_color="#D8DED3",
+        focused_border_color=GREEN,
+        text_size=12,
+    )
+    profile_chart = ft.Container(
+        content=ft.Text(
+            "身長と体重を記録すると変化がグラフで表示されます",
+            size=11,
+            color=MUTED,
+        ),
+        padding=10,
+        bgcolor="#F6F7F3",
+        border_radius=12,
+    )
     level_progress = ft.ProgressBar(
         value=0,
         color=GREEN,
@@ -532,13 +741,21 @@ def main(page: ft.Page):
 
     async def choose_photo(event):
         nonlocal selected_photo
-        files = await file_picker.pick_files(
-            dialog_title="食べものの写真を撮る・選ぶ",
-            file_type=ft.FilePickerFileType.IMAGE,
-            allow_multiple=False,
-            with_data=True,
-            compression_quality=70,
-        )
+        try:
+            files = await file_picker.pick_files(
+                dialog_title="食べものの写真を撮る・選ぶ",
+                file_type=ft.FilePickerFileType.IMAGE,
+                allow_multiple=False,
+                with_data=True,
+                compression_quality=70,
+                cancel_upload_on_window_blur=False,
+            )
+        except (TimeoutError, RuntimeError):
+            notify(
+                "写真選択を開始できませんでした。ブラウザを再読み込みして、もう一度お試しください。",
+                "#B24B3F",
+            )
+            return
         if not files:
             return
         photo = files[0].bytes
@@ -560,13 +777,21 @@ def main(page: ft.Page):
 
     async def choose_character_icon(event):
         nonlocal character_icon
-        files = await file_picker.pick_files(
-            dialog_title="キャラクターのアイコン画像を選ぶ",
-            file_type=ft.FilePickerFileType.IMAGE,
-            allowed_extensions=["jpg", "jpeg", "png", "webp", "gif"],
-            allow_multiple=False,
-            with_data=True,
-        )
+        try:
+            files = await file_picker.pick_files(
+                dialog_title="キャラクターのアイコン画像を選ぶ",
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["jpg", "jpeg", "png", "webp", "gif"],
+                allow_multiple=False,
+                with_data=True,
+                cancel_upload_on_window_blur=False,
+            )
+        except (TimeoutError, RuntimeError):
+            notify(
+                "画像選択を開始できませんでした。ブラウザを再読み込みして、もう一度お試しください。",
+                "#B24B3F",
+            )
+            return
         if not files:
             return
         image_file = files[0]
@@ -659,7 +884,67 @@ def main(page: ft.Page):
         mood_status.value = f"今日の気分：{selected}"
         page.update()
 
+    def render_profile_chart():
+        nonlocal profile_data
+        chart_src = build_measurement_chart_svg(
+            profile_data.get("history", []),
+            profile_data.get("height_cm", ""),
+            profile_data.get("weight_kg", ""),
+        )
+        if chart_src:
+            profile_chart.content = ft.Image(
+                src=chart_src,
+                width=290,
+                height=120,
+                fit=ft.BoxFit.COVER,
+            )
+        else:
+            profile_chart.content = ft.Text(
+                "身長と体重を記録すると変化がグラフで表示されます",
+                size=11,
+                color=MUTED,
+            )
+        page.update()
+
+    def save_profile_fields(event=None):
+        nonlocal profile_data
+        profile = {
+            "height_cm": (height_field.value or "").strip(),
+            "weight_kg": (weight_field.value or "").strip(),
+            "history": profile_data.get("history", []),
+        }
+        if profile["height_cm"] and not profile["height_cm"].replace(".", "", 1).isdigit():
+            profile["height_cm"] = ""
+        if profile["weight_kg"] and not profile["weight_kg"].replace(".", "", 1).isdigit():
+            profile["weight_kg"] = ""
+        height_field.value = profile["height_cm"]
+        weight_field.value = profile["weight_kg"]
+        today = date.today().isoformat()
+        history = [
+            entry for entry in profile["history"] if entry.get("date") != today
+        ]
+        if profile["height_cm"] or profile["weight_kg"]:
+            history.append(
+                {
+                    "date": today,
+                    "height_cm": profile["height_cm"],
+                    "weight_kg": profile["weight_kg"],
+                }
+            )
+        profile["history"] = normalize_profile_history(history)
+        profile_data = {
+            "height_cm": profile["height_cm"],
+            "weight_kg": profile["weight_kg"],
+            "history": profile["history"],
+        }
+        save_profile_data(profile_data)
+        render_profile_chart()
+
+    height_field.on_blur = save_profile_fields
+    weight_field.on_blur = save_profile_fields
+
     mood_dropdown.on_change = change_today_mood
+    render_profile_chart()
     mood_status.value = (
         f"今日の気分：{get_today_mood(mood_entries)}"
         if get_today_mood(mood_entries)
@@ -670,9 +955,9 @@ def main(page: ft.Page):
         stage_index, _ = get_character_stage(character_exp)
         threshold = CHARACTER_STAGES[stage_index][0]
         _, name, description = CHARACTER_DESIGNS[character_design][stage_index]
-        kind, avatar_widget = build_icon_visual(character_icon, size=38, radius=34)
-        character_avatar.content = avatar_widget
-        profile_avatar.content = build_icon_visual(character_icon, size=46, radius=41)[1]
+        kind, _ = build_icon_visual(character_icon, size=38, radius=34)
+        character_avatar.content = render_icon_visual(character_icon, size=38, radius=34)
+        profile_avatar.content = render_icon_visual(character_icon, size=46, radius=41)
         character_icon_status.value = "自分の画像" if kind == "image" else "絵文字アイコン"
         character_name.value = f"{name}　・　記録 {character_exp}回"
         character_description.value = description
@@ -1525,6 +1810,19 @@ def main(page: ft.Page):
                                     ft.Text("今日の気分", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
                                     mood_dropdown,
                                     mood_status,
+                                ],
+                                spacing=6,
+                            ),
+                            padding=12,
+                            bgcolor="#FFFFFF",
+                            border_radius=14,
+                        ),
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.Text("身長・体重", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
+                                    ft.Row([height_field, weight_field], spacing=8, wrap=True),
+                                    profile_chart,
                                 ],
                                 spacing=6,
                             ),
